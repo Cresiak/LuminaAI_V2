@@ -1,72 +1,126 @@
 
 import { GoogleGenAI } from "@google/genai";
-import { EnhancementQuality } from "../types";
+import { EnhancementQuality, IntegrityMode, ExportResolution } from "../types";
 
-const getPromptByQuality = (quality: EnhancementQuality) => {
+const getIntegrityInstructions = (mode: IntegrityMode) => {
+  switch (mode) {
+    case IntegrityMode.EXPRESSION:
+      return `
+1. EXPRESSION INTEGRITY (MAXIMUM):
+   - Treat the human face (eyes, mouth, nose, facial muscles) as an IMMUTABLE ZONE. 
+   - You MUST NOT change the shape, position, or expression of any facial feature. 
+   - The subject's mood and micro-expressions must remain identical to the original.
+`;
+    case IntegrityMode.GEOMETRY:
+      return `
+1. GEOMETRY & STRUCTURE INTEGRITY:
+   - Focus on man-made structures, architecture, and straight lines.
+   - Do NOT warp any perspective or bend any lines that are straight in the original.
+   - Maintain the exact proportions and structural thickness of all objects.
+`;
+    case IntegrityMode.TEXTURE:
+      return `
+1. TEXTURE & GRAIN INTEGRITY:
+   - Zero-smoothing policy. Preserve 100% of the original surface texture, film grain, or digital noise character.
+   - Only shift the luminance and color values; do not apply any denoising that might blur fine details or patterns.
+`;
+    case IntegrityMode.COLOR_ONLY:
+      return `
+1. PHOTOREALISTIC COLOR INTEGRITY:
+   - No sharpening or edge enhancement. 
+   - Only perform lighting (exposure) recovery and color correction.
+   - Ensure the image remains "soft" if the original was soft; do not introduce AI-generated clarity or fake edges.
+`;
+    default:
+      return "";
+  }
+};
+
+const getPromptByQuality = (quality: EnhancementQuality, mode: IntegrityMode, resolution: ExportResolution, customPrompt?: string) => {
+  const is8K = resolution === ExportResolution.K8;
   const baseInstructions = `
-Act as a professional high-end photo retoucher and lighting expert. 
-Enhance this image following these specific instructions:
+Act as a professional technical photo editor. Your primary goal is "Technical Restoration," not "Generative Alteration."
+${getIntegrityInstructions(mode)}
 
-1. IDENTITY & EXPRESSION PRESERVATION (HIGHEST PRIORITY): 
-   - You MUST keep all human faces exactly as they are in terms of anatomy, bone structure, and expression. 
-   - Do NOT alter the person's identity, smile, eye shape, or subtle facial movements. 
-   - The goal is to see the person better, not to change who they are or how they look.
+2. LIGHTING RESTORATION:
+   - Correct backlighting (HDR recovery). Bring the subject out of the shadows.
+   - Balance global exposure. Recover details in clipped highlights and crushed shadows.
+   - Use intelligent local contrast to make the subject visible without changing their physical form.
 
-2. BACKLIT CORRECTION & EXPOSURE: 
-   - Specifically identify and fix backlit subjects. 
-   - Use advanced shadow recovery to bring out details in silhouetted or underexposed subjects. 
-   - Carefully tone down overexposed highlights in the background (like the sky or windows) to create a balanced, professional HDR look.
-
-3. COLOR CORRECTION: 
-   - Adjust white balance for natural, skin-friendly tones. 
-   - Ensure skin tones remain realistic and consistent with the original lighting environment.
+3. COLOR FIDELITY:
+   - Restore natural white balance and saturation levels consistent with a high-end RAW development process.
+${is8K ? "\n4. ULTRA-HIGH DETAIL: This is an 8K target. Use maximum sub-pixel rendering to define edge micro-textures without introducing artifacts." : ""}
 `;
 
   const qualitySpecifics = {
     [EnhancementQuality.LOW]: `
-4. EFFICIENCY FOCUS: 
-   - Focus on essential exposure correction and primary color balance. 
-   - Use moderate sharpening.
-   - Aim for a clean, natural look with standard processing depth.
+5. PROCESSING: Basic HDR recovery and essential color balance.
 `,
     [EnhancementQuality.MEDIUM]: `
-4. PROFESSIONAL BALANCED ENHANCEMENT: 
-   - Apply intelligent sharpening to emphasize textures and micro-contrasts.
-   - Enhance color depth and vibrancy for a professional cinematic feel.
-   - Smooth out noise in recovered shadow areas while meticulously preserving original skin textures and pores.
+5. PROCESSING: Advanced shadow extraction and noise-aware restoration.
 `,
     [EnhancementQuality.HIGH]: `
-4. MAXIMUM DETAIL & ULTRA-HDR: 
-   - Prioritize pixel-perfect texture recovery. 
-   - Use extreme precision in shadow recovery to unveil the finest details previously hidden in the dark.
-   - Apply multi-layered color grading for maximum depth and professional vibrancy.
-   - Ensure the highest possible level of micro-contrast sharpening for a stunning "pop" effect.
-   - Meticulous noise reduction that mimics high-end full-frame sensor output.
+5. PROCESSING: Ultra-HD reconstruction focusing on micro-contrast and deep dynamic range mapping.
 `
   };
 
-  return baseInstructions + qualitySpecifics[quality] + "\nThe output must be ONLY the enhanced version of the image.";
+  let fullPrompt = baseInstructions + qualitySpecifics[quality];
+
+  if (customPrompt && customPrompt.trim().length > 0) {
+    fullPrompt += `\n\n6. USER-SPECIFIC OVERRIDE: 
+   - The user context: "${customPrompt.trim()}"
+   - Adhere to this ONLY if it does not violate the selected Integrity Mode.
+`;
+  }
+
+  fullPrompt += "\nOUTPUT: Return ONLY the processed image. No text.";
+  return fullPrompt;
 };
 
-export async function enhanceImage(base64Data: string, mimeType: string, quality: EnhancementQuality = EnhancementQuality.MEDIUM): Promise<string> {
+export async function enhanceImage(
+  base64Data: string, 
+  mimeType: string, 
+  quality: EnhancementQuality = EnhancementQuality.MEDIUM,
+  mode: IntegrityMode = IntegrityMode.EXPRESSION,
+  resolution: ExportResolution = ExportResolution.FHD,
+  customPrompt?: string
+): Promise<string> {
   try {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     
+    // Map internal ExportResolution to Gemini API imageSize
+    let apiImageSize: "1K" | "2K" | "4K" = "1K";
+    let modelName = 'gemini-2.5-flash-image';
+
+    if (resolution === ExportResolution.K2) {
+      apiImageSize = "2K";
+      modelName = 'gemini-3-pro-image-preview';
+    } else if (resolution === ExportResolution.K4 || resolution === ExportResolution.K8) {
+      apiImageSize = "4K";
+      modelName = 'gemini-3-pro-image-preview';
+    }
+
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
+      model: modelName,
       contents: {
         parts: [
           {
             inlineData: {
-              data: base64Data.split(',')[1], // Remove prefix if present
+              data: base64Data.split(',')[1],
               mimeType: mimeType,
             },
           },
           {
-            text: getPromptByQuality(quality)
+            text: getPromptByQuality(quality, mode, resolution, customPrompt)
           },
         ],
       },
+      config: modelName === 'gemini-3-pro-image-preview' ? {
+        imageConfig: {
+          imageSize: apiImageSize,
+          aspectRatio: "1:1" // Aspect ratio is required, 1:1 is safe as base.
+        }
+      } : undefined
     });
 
     let enhancedBase64 = '';
@@ -87,6 +141,9 @@ export async function enhanceImage(base64Data: string, mimeType: string, quality
     return enhancedBase64;
   } catch (error: any) {
     console.error("Gemini Enhancement Error:", error);
+    if (error.message?.includes("Requested entity was not found")) {
+      throw new Error("API_KEY_ERROR");
+    }
     throw new Error(error.message || "Failed to enhance image");
   }
 }
