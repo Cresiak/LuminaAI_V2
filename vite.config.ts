@@ -6,10 +6,10 @@ export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
     return {
       server: {
-          base: /LuminaAI_V2/,
         port: 3000,
         host: '0.0.0.0',
       },
+      base: '/LuminaAI_V2/',
       plugins: [react()],
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
